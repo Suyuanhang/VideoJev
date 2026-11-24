@@ -10,20 +10,24 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Sampler
 
+from .device import (distributed_backend, manual_seed_all, resolve_device, set_device)
+
 
 def setup(seed):
     rank, world = int(os.environ.get('RANK', 0)), int(os.environ.get('WORLD_SIZE', 1))
     local = int(os.environ.get('LOCAL_RANK', 0))
-    torch.cuda.set_device(local)
+    device = resolve_device(local)
+    set_device(device)
     torch.set_num_threads(2)
     if world > 1:
-        dist.init_process_group('nccl', device_id=torch.device('cuda', local))
+        dist.init_process_group(distributed_backend(device), device_id=device)
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    return rank, world, torch.device('cuda', local)
+    manual_seed_all(seed)
+    if device.type == 'cuda':
+        # Preserve the official CUDA numerics: TF32 matmul stays disabled.
+        torch.backends.cuda.matmul.allow_tf32 = False
+    return rank, world, device
 
 
 class BucketSampler(Sampler):

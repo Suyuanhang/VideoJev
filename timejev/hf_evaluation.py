@@ -1,6 +1,7 @@
 """Evaluate released HF checkpoints with labeled JSONL manifests."""
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .qa_eval_settings import QA_CONTEXT
@@ -177,6 +178,9 @@ def main(argv=None):
     parser.add_argument('--reference', help='Official annotation file for one QA benchmark')
     parser.add_argument('--grounding-context', type=int, default=147456)
     parser.add_argument('--threshold', type=float, default=.25)
+    parser.add_argument('--attn', default='auto',
+                        help="Attention backend: auto (flash-attn on CUDA, SDPA on NPU/CPU) "
+                             "or an explicit transformers name (sdpa, flash_attention_2, eager)")
     parser.add_argument('--dry-run', action='store_true', help='Validate manifests without loading weights')
     args = parser.parse_args(argv)
     if args.plans and args.manifest:
@@ -190,9 +194,11 @@ def main(argv=None):
     import torch
     import torch.distributed as dist
     from transformers import AutoModel, AutoProcessor
+    from .device import attention_implementation, enable_torch_linear_attention
     from .engine import setup, save_json, sha256
     from .user_data import write_jsonl
     rank, world, device = setup(20260924)
+    attn = attention_implementation(device, args.attn)
     out = Path(args.out)
     if (out/'summary.json').exists():
         raise FileExistsError(f'Choose a new output directory: {out}')
@@ -202,9 +208,15 @@ def main(argv=None):
         raise ValueError('Expected a VideoJev Hugging Face checkpoint')
     processor = AutoProcessor.from_pretrained(directory, trust_remote_code=True)
     model, loading = AutoModel.from_pretrained(directory, trust_remote_code=True, dtype='auto',
-        device_map={'': str(device)}, attn_implementation='flash_attention_2', output_loading_info=True)
+        device_map={'': str(device)}, attn_implementation=attn, output_loading_info=True)
     if any(loading.get(k) for k in ('missing_keys', 'unexpected_keys', 'mismatched_keys', 'error_msgs')):
         raise ValueError(f'Incomplete checkpoint: {loading}')
+    # Explicit escape hatch for accelerators whose FLA Triton kernels are unsupported:
+    # VIDEOJEV_TORCH_LINEAR_ATTN=1 selects the pure-torch linear-attention path
+    # shipped inside transformers. Unset by default, so CUDA runs keep FLA kernels.
+    if os.environ.get('VIDEOJEV_TORCH_LINEAR_ATTN') == '1':
+        switched = enable_torch_linear_attention(model)
+        print(f'[videojev] torch linear-attention fallback enabled on {switched} layers')
     model.prepare_for_inference()
     summary = {}
     with torch.inference_mode():

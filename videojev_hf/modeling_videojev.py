@@ -16,6 +16,21 @@ from .processing_videojev import prepare_query_groups, prepare_video, format_pre
 from .videojev_moe import install_fp32_routers, install_xtuner_grouped_experts
 
 
+def _bf16_autocast(device):
+    """Return a BF16 autocast context for the device's own backend.
+
+    Args:
+        device (torch.device): device holding the model parameters.
+
+    Returns:
+        context manager: ``torch.autocast`` on CUDA/NPU (identical to the
+        original CUDA call there), or a null context on CPU.
+    """
+    if device.type == 'cpu':
+        return contextlib.nullcontext()
+    return torch.autocast(device.type, dtype=torch.bfloat16)
+
+
 class AttentionOnlyDecoderLayer(Qwen3_5DecoderLayer):
     def forward(self, hidden_states, position_embeddings, attention_mask=None,
                 position_ids=None, past_key_values=None, **kwargs):
@@ -110,7 +125,7 @@ class VideoJevForVideoUnderstanding(PreTrainedModel):
         if len(pixel_values_videos) != t*h*w:
             raise ValueError('Video grid and native pixel patches disagree')
         output = []
-        amp = torch.autocast('cuda', dtype=torch.bfloat16) if device.type == 'cuda' else contextlib.nullcontext()
+        amp = _bf16_autocast(device)
         with amp:
             for start in range(0, t, groups_per_chunk):
                 count = min(groups_per_chunk, t-start)
@@ -137,7 +152,7 @@ class VideoJevForVideoUnderstanding(PreTrainedModel):
         tasks = torch.as_tensor(decision_tasks, device=device)
         if tasks.shape != queries.shape or not ((tasks == 0) | (tasks == 1)).all():
             raise ValueError('decision_tasks must contain one grounding(0)/choice(1) value per question')
-        amp = torch.autocast('cuda', dtype=torch.bfloat16) if device.type == 'cuda' else contextlib.nullcontext()
+        amp = _bf16_autocast(device)
         with amp:
             embeds = self.get_input_embeddings()(input_ids)
             slots = input_ids == self.config.backbone_config.video_token_id

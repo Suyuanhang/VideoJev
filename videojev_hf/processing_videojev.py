@@ -152,5 +152,10 @@ def format_predictions(output, rows, record, decoder):
             value['interval'] = decode(logits, record['score_times'], record['sampled_duration'],
                 decoder['threshold'], decoder['smooth'], bounds=record['score_bounds'],
                 postprocess=decoder['postprocess'])
+            # Preserve native per-cell logits and their temporal cells so the
+            # single-point rule argmax(logits) -> score_bounds[k][0] is
+            # recoverable offline without re-decoding the video.
+            value['logits'] = logits
+            value['score_bounds'] = record['score_bounds']
         results.append(value)
     return results
